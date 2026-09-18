@@ -1,18 +1,12 @@
 'use client';
 
 import { useState } from 'react';
-import { createClient } from '@supabase/supabase-js';
 import { Music, Flower, UtensilsCrossed, Castle, Camera, UploadCloud } from 'lucide-react';
-
-// Initialize Supabase client directly inside the file using environment configurations
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
-const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
 export default function ContractUploadDashboard() {
   const [uploading, setUploading] = useState<string | null>(null);
 
-  // Modern configuration mapping components natively
+  // Clean dashboard icon grid mappings
   const contractCategories = [
     { id: 'dj', name: 'DJ & Entertainment', icon: Music, color: 'text-indigo-600 bg-indigo-50 border-indigo-100' },
     { id: 'florist', name: 'Florist & Decor', icon: Flower, color: 'text-rose-600 bg-rose-50 border-rose-100' },
@@ -28,25 +22,27 @@ export default function ContractUploadDashboard() {
     setUploading(categoryId);
 
     try {
-      // Temporary placeholder text payload until backend parsing engine is hooked up
-      const mockExtractedText = `Raw uploaded text template for a ${categoryId} contract.`;
+      // 1. Pack the real document file binary data inside a standardized web form package
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('vendorType', categoryId);
 
-      const { data, error } = await supabase
-        .from('bronze_contract_raw_payloads')
-        .insert([
-          {
-            file_name: file.name,
-            raw_text: mockExtractedText,
-            vendor_type: categoryId,
-            status: 'pending'
-          }
-        ]);
+      // 2. Fire the form package over to your fresh Next.js backend text extraction script
+      const response = await fetch('/api/parse-contract', {
+        method: 'POST',
+        body: formData,
+      });
 
-      if (error) throw error;
-      alert(`${file.name} successfully uploaded to the ${categoryId} category!`);
-    } catch (err:any) {
+      const result = await response.json();
+
+      if (!response.ok) {
+        throw new Error(result.error || 'Server parsing runtime pipeline failed');
+      }
+
+      alert(`Success! Real text successfully scraped from "${file.name}" and locked into your Bronze table!`);
+    } catch (err: any) {
       console.error(err);
-      alert(`Upload failed: ${err.message || 'Unknown network error'}.`);
+      alert(`Upload failed: ${err.message || 'Unknown network processing glitch'}`);
     } finally {
       setUploading(null);
     }
@@ -95,7 +91,7 @@ export default function ContractUploadDashboard() {
                     : 'bg-slate-900 border-slate-900 text-white hover:bg-slate-800 hover:border-slate-800 shadow-sm shadow-slate-900/10'
                 }`}>
                   {uploading === category.id ? (
-                    <span className="flex items-center gap-2 animate-pulse">Processing...</span>
+                    <span className="flex items-center gap-2 animate-pulse">Parsing file...</span>
                   ) : (
                     <>
                       <UploadCloud className="h-4 w-4 opacity-80" />
