@@ -1,78 +1,153 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
-// @ts-ignore
-import pdf from 'pdf-parse'; // changed to wildcard import to fix the ESM export crash
-// @ts-ignore
-import mammoth from 'mammoth';
+import { GoogleGenAI } from '@google/genai';
+import { PDFParse } from 'pdf-parse';
 
-// Initialize server-side Supabase client using secret environmental values
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
-const supabase = createClient(supabaseUrl, supabaseAnonKey);
+export const runtime = 'nodejs';
 
-export async function POST(request: NextRequest) {
+const MIN_USEFUL_TEXT_LENGTH = 40;
+
+const GEMINI_TRANSCRIBE_PROMPT = `You are an expert contract transcriber for a wedding planning application.
+Read this document carefully. Extract and transcribe all visible textual content,
+clauses, payment schedules, names, and terms exactly as written.
+If the document is a scanned image, screenshot, blurry photo, or handwriting, use your vision capabilities to perform high-fidelity text extraction.
+Return ONLY the extracted text lines. Do not add conversational introductions, summaries, or markdown fences.`;
+
+type ExtractionMethod = 'local' | 'gemini';
+
+function isPdf(file: File) {
+  return file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+}
+
+function normalizeLocalPdfText(text: string) {
+  return text
+    .replace(/--\s*\d+\s+of\s+\d+\s*--/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function hasUsefulText(text: string) {
+  return normalizeLocalPdfText(text).length >= MIN_USEFUL_TEXT_LENGTH;
+}
+
+async function extractLocalPdfText(bytes: Uint8Array): Promise<string> {
   try {
-    // 1. Extract the form data payload coming from the browser frontend
+    const parser = new PDFParse({ data: bytes.slice() });
+    try {
+      const result = await parser.getText();
+      const text = result.text?.trim() ?? '';
+      if (text) return text;
+    } finally {
+      await parser.destroy();
+    }
+  } catch (error) {
+    console.warn('pdf-parse failed, trying pdf-parse-fork:', error);
+  }
+
+  try {
+    const pdfParseFork = (await import('pdf-parse-fork')).default as (buffer: Buffer) => Promise<{ text?: string }>;
+    const result = await pdfParseFork(Buffer.from(bytes));
+    return result.text?.trim() ?? '';
+  } catch (error) {
+    console.warn('pdf-parse-fork failed, trying pdf-text-reader:', error);
+  }
+
+  try {
+    const { readPdfText } = await import('pdf-text-reader');
+    return (await readPdfText({ data: bytes.slice() })).trim();
+  } catch (error) {
+    console.warn('Local PDF parsers could not extract text:', error);
+    return '';
+  }
+}
+
+async function extractWithGemini(base64Data: string): Promise<string> {
+  const ai = new GoogleGenAI({
+    apiKey: process.env.GEMINI_API_KEY,
+    httpOptions: {
+      retryOptions: {
+        attempts: 4,
+      },
+    },
+  });
+
+  const aiResponse = await ai.models.generateContent({
+    model: 'gemini-3.5-flash',
+    contents: [
+      {
+        inlineData: {
+          mimeType: 'application/pdf',
+          data: base64Data,
+        },
+      },
+      {
+        text: GEMINI_TRANSCRIBE_PROMPT,
+      },
+    ],
+  });
+
+  return aiResponse.text?.trim() ?? '';
+}
+
+export async function POST(request: Request) {
+  try {
     const formData = await request.formData();
-    const file = formData.get('file') as File;
-    const vendorType = formData.get('vendorType') as string;
+    const file = formData.get('contract') as File;
+    const vendorType = (formData.get('vendorType') as string) || 'unassigned';
 
     if (!file) {
-      return NextResponse.json({ error: 'No file provided in the upload request' }, { status: 400 });
+      return NextResponse.json({ error: 'No file uploaded' }, { status: 400 });
     }
 
-    // 2. Convert the uploaded file data into a raw Node.js buffer memory segment
-    const arrayBuffer = await file.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
-
-    let extractedText = '';
-
-    // 3. Conditional routine to pick the correct parsing package based on the file type
-    if (file.type === 'application/pdf' || file.name.endsWith('.pdf')) {
-      // Run pdf-parse text extraction
-      const pdfparser = (pdf.default ||pdf) as any
-      const pdfData = await pdf(buffer);
-      extractedText = pdfData.text;
-    } else if (file.name.endsWith('.docx')) {
-      // Run mammoth text extraction for Word documents
-      const wordResult = await mammoth.extractRawText({ buffer: buffer });
-      extractedText = wordResult.value;
-    } else {
-      return NextResponse.json({ error: 'Unsupported file type. Please upload a PDF or DOCX file' }, { status: 400 });
+    if (!isPdf(file)) {
+      return NextResponse.json({ error: 'Please upload a PDF contract' }, { status: 400 });
     }
 
-    if (!extractedText || extractedText.trim() === '') {
-      return NextResponse.json({ error: 'Could not extract any clean text from this document' }, { status: 422 });
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const base64Data = Buffer.from(bytes).toString('base64');
+
+    let extractedText = normalizeLocalPdfText(await extractLocalPdfText(bytes));
+    let extractionMethod: ExtractionMethod = 'local';
+
+    if (!hasUsefulText(extractedText)) {
+      extractionMethod = 'gemini';
+      extractedText = await extractWithGemini(base64Data);
     }
 
-    // 4. Save the real scraped text block straight into your Bronze database table
+    if (!extractedText) {
+      throw new Error('No text could be extracted from this PDF with local parsing or Gemini.');
+    }
+
+    const supabase = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+    );
+
     const { data, error } = await supabase
-      .from('bronze_contract_new_payloads')
+      .from('bronze_contract_raw_payloads')
       .insert([
         {
           file_name: file.name,
-          raw_text: extractedText, // This now holds the actual full sentences of the contract!
+          raw_text: extractedText,
+          status: 'pending',
           vendor_type: vendorType,
-          status: 'pending'
-        }
+        },
       ])
       .select()
       .single();
 
     if (error) {
-      console.error('Supabase DB error:', error);
-      return NextResponse.json({ error: `Database insert failed: ${error.message}` }, { status: 500 });
+      console.error('Supabase Core Sync Error:', error);
+      throw error;
     }
 
-    // 5. Send a clean response back to the client layout confirming processing completion
     return NextResponse.json({
-      success: true,
-      message: 'Contract text successfully extracted and saved to database',
-      record: data
+      id: data.id,
+      message: 'Scanned document processed',
+      extractionMethod,
     });
-
-  } catch (err: any) {
-    console.error('Parser server route crashed:', err);
-    return NextResponse.json({ error: `Internal Server Error: ${err.message}` }, { status: 500 });
+  } catch (error: any) {
+    console.error('Contract ingestion crash:', error.message);
+    return NextResponse.json({ error: error.message || 'Internal processing error' }, { status: 500 });
   }
 }

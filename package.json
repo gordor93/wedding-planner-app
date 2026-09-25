@@ -9,11 +9,14 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@google/genai": "^2.23.0",
     "@supabase/supabase-js": "^2.116.0",
     "lucide-react": "^1.47.0",
     "mammoth": "^1.12.3",
     "next": "16.3.5",
     "pdf-parse": "^2.4.5",
+    "pdf-parse-fork": "^1.2.0",
+    "pdf-text-reader": "^5.1.1",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },
