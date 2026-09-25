@@ -46,8 +46,8 @@ export default function UploadPage() {
 
       if (response.ok) {
         const parserLabel =
-          result.extractionMethod === 'gemini'
-            ? 'Gemini (scan or screenshot PDF)'
+          result.extractionMethod === 'openai'
+            ? 'OpenAI (scan or screenshot PDF)'
             : 'local PDF text extraction'
         setStatus(`✅ Saved to Bronze via ${parserLabel}! Processing data into structured Silver tables now...`)
     
@@ -64,7 +64,7 @@ export default function UploadPage() {
         const silverResult = await silverResponse.json()
     
         if (silverResponse.ok) {
-          setStatus(`✅ Done! Extracted "${silverResult.vendor.company_name}" directly into your Silver Vendors table!`)
+          setStatus(`✅ Done! Extracted "${silverResult.contract.client_name}" into Silver Contracts!`)
         } else {
           setStatus(`⚠️ Saved raw text to Bronze, but Silver parsing failed: ${silverResult.error}`)
         }
