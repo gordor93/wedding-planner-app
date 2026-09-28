@@ -7,6 +7,7 @@ const nextConfig: NextConfig = {
     "pdf-text-reader",
     "pdfjs-dist",
     "@napi-rs/canvas",
+    "openai",
   ],
 };
 

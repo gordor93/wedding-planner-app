@@ -1,9 +1,10 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
-import { GoogleGenAI } from '@google/genai';
 import { PDFParse } from 'pdf-parse';
+import { formatOpenAIError, transcribePdfWithOpenAI } from '@/lib/openai';
 
 export const runtime = 'nodejs';
+export const maxDuration = 300;
 
 const MIN_USEFUL_TEXT_LENGTH = 40;
 
@@ -13,7 +14,7 @@ clauses, payment schedules, names, and terms exactly as written.
 If the document is a scanned image, screenshot, blurry photo, or handwriting, use your vision capabilities to perform high-fidelity text extraction.
 Return ONLY the extracted text lines. Do not add conversational introductions, summaries, or markdown fences.`;
 
-type ExtractionMethod = 'local' | 'gemini';
+type ExtractionMethod = 'local' | 'openai';
 
 function isPdf(file: File) {
   return file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
@@ -61,32 +62,8 @@ async function extractLocalPdfText(bytes: Uint8Array): Promise<string> {
   }
 }
 
-async function extractWithGemini(base64Data: string): Promise<string> {
-  const ai = new GoogleGenAI({
-    apiKey: process.env.GEMINI_API_KEY,
-    httpOptions: {
-      retryOptions: {
-        attempts: 4,
-      },
-    },
-  });
-
-  const aiResponse = await ai.models.generateContent({
-    model: 'gemini-3.5-flash',
-    contents: [
-      {
-        inlineData: {
-          mimeType: 'application/pdf',
-          data: base64Data,
-        },
-      },
-      {
-        text: GEMINI_TRANSCRIBE_PROMPT,
-      },
-    ],
-  });
-
-  return aiResponse.text?.trim() ?? '';
+async function extractWithOpenAI(bytes: Uint8Array): Promise<string> {
+  return transcribePdfWithOpenAI(bytes, GEMINI_TRANSCRIBE_PROMPT);
 }
 
 export async function POST(request: Request) {
@@ -104,18 +81,21 @@ export async function POST(request: Request) {
     }
 
     const bytes = new Uint8Array(await file.arrayBuffer());
-    const base64Data = Buffer.from(bytes).toString('base64');
 
     let extractedText = normalizeLocalPdfText(await extractLocalPdfText(bytes));
     let extractionMethod: ExtractionMethod = 'local';
 
     if (!hasUsefulText(extractedText)) {
-      extractionMethod = 'gemini';
-      extractedText = await extractWithGemini(base64Data);
+      extractionMethod = 'openai';
+      try {
+        extractedText = await extractWithOpenAI(bytes);
+      } catch (error) {
+        throw new Error(formatOpenAIError(error));
+      }
     }
 
     if (!extractedText) {
-      throw new Error('No text could be extracted from this PDF with local parsing or Gemini.');
+      throw new Error('No text could be extracted from this PDF with local parsing or OpenAI.');
     }
 
     const supabase = createClient(

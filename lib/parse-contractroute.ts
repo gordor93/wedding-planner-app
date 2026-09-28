@@ -9,11 +9,12 @@ export type PaymentMilestone = {
 };
 
 export type SilverContract = {
+  vendor_name: string;
   vendor_type: string;
+  contract_type: string;
   client_name: string;
   event_date: string;
   payment_milestones: PaymentMilestone[];
-  key_questionnaire_items: string[];
 };
 
 export type SilverContractRow = SilverContract & {
@@ -46,11 +47,12 @@ export async function parseProcessSilver(rawContractText: string): Promise<Silve
           content: [
             {
               type: 'input_text',
-              text: `You extract structured wedding-contract data for a planning app.
-Analyze this standard wedding contract (1 to 10 pages). Extrapolate missing labels only when the document clearly implies them, and summarize each field concisely.
-Return vendor_type, client_name, event_date, payment milestones, and onboarding questionnaire items.
+              text: `You extract structured wedding-document data for a planning app.
+Analyze this 1 to 10 page wedding contract or proposal. Extrapolate labels only when the document clearly implies them, and summarize each field concisely.
+Return vendor_name, vendor_type, contract_type (for example proposal, contract, or invoice), client_name, event_date, and payment milestones.
+If a field is not present, use an empty string or an empty array. Do not invent payment due dates.
 
-Contract text:
+Document text:
 ${rawContractText}`,
             },
           ],
@@ -65,13 +67,21 @@ ${rawContractText}`,
             type: 'object',
             additionalProperties: false,
             properties: {
+              vendor_name: {
+                type: 'string',
+                description: 'Business name on the document, for example Flower Lab Design',
+              },
               vendor_type: {
                 type: 'string',
-                description: 'Vendor category that maps to the silver_contracts.vendor_type column',
+                description: 'Vendor category such as florist, decor, venue, or entertainment',
+              },
+              contract_type: {
+                type: 'string',
+                description: 'Document kind such as proposal, contract, or invoice',
               },
               client_name: {
                 type: 'string',
-                description: 'Couple or client name on the contract',
+                description: 'Couple or client name on the document',
               },
               event_date: {
                 type: 'string',
@@ -83,24 +93,20 @@ ${rawContractText}`,
                   type: 'object',
                   additionalProperties: false,
                   properties: {
-                    due_date: { type: 'string', description: 'Payment due date' },
+                    due_date: { type: 'string', description: 'Payment due date, or empty if not stated' },
                     amount: { type: 'string', description: 'Payment amount including currency if present' },
                   },
                   required: ['due_date', 'amount'],
                 },
               },
-              key_questionnaire_items: {
-                type: 'array',
-                items: { type: 'string' },
-                description: 'Concise onboarding questions or requirements pulled from the contract',
-              },
             },
             required: [
+              'vendor_name',
               'vendor_type',
+              'contract_type',
               'client_name',
               'event_date',
               'payment_milestones',
-              'key_questionnaire_items',
             ],
           },
         },

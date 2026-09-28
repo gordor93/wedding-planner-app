@@ -59,11 +59,12 @@ export async function POST(request: Request) {
           wedding_id: weddingId || null,
           bronze_payload_id: payloadId,
           vendor_id: vendorId,
+          vendor_name: silverContract.vendor_name,
           vendor_type: silverContract.vendor_type || bronzeData.vendor_type,
+          contract_type: silverContract.contract_type,
           client_name: silverContract.client_name,
           event_date: silverContract.event_date,
           payment_milestones: silverContract.payment_milestones,
-          key_questionnaire_items: silverContract.key_questionnaire_items,
         },
       ])
       .select()
