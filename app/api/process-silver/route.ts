@@ -153,20 +153,27 @@ export async function POST(request: Request) {
       .maybeSingle();
 
     if (silverError || !newContract) {
-      const permissionDenied = /permission denied/i.test(silverError?.message || '');
-      if (!permissionDenied) {
+      const retryableSchemaIssue = /permission denied|not-null constraint/i.test(
+        silverError?.message || ''
+      );
+      if (!retryableSchemaIssue) {
         await supabase
           .from('bronze_contract_raw_payloads')
           .update({ status: 'failed_validation' })
           .eq('id', bronzeData.id);
       }
 
+      const permissionDenied = /permission denied/i.test(silverError?.message || '');
+      const missingWedding = /wedding_id/i.test(silverError?.message || '');
+
       return NextResponse.json(
         {
           success: false,
           error: permissionDenied
             ? 'The anon role cannot write silver_contracts. Run supabase/silver_contracts.sql in the Supabase SQL editor, then upload again.'
-            : 'Silver insert was skipped because the row failed PostgreSQL type checks',
+            : missingWedding
+              ? 'silver_contracts.wedding_id is required in the database, but this upload is not tied to a wedding yet. Run supabase/silver_contracts.sql to allow null wedding_id, then upload the same file again.'
+              : 'Silver insert was skipped because the row failed PostgreSQL type checks',
           errors: [silverError?.message || 'insert returned no row'],
           warnings,
         },

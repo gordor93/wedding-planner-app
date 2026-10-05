@@ -12,6 +12,12 @@ alter table public.silver_contracts
   add column if not exists grand_total numeric,
   add column if not exists payment_milestones jsonb default '[]'::jsonb;
 
+alter table public.silver_contracts
+  alter column wedding_id drop not null;
+
+alter table public.silver_contracts
+  alter column vendor_id drop not null;
+
 create index if not exists silver_contracts_wedding_id_idx
   on public.silver_contracts (wedding_id);
 
