@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
+import { bronzeRawText } from '@/lib/bronze-payload';
 import { formatOpenAIError } from '@/lib/openai';
 import { parseSilverContractInPageBatches, type SilverContract } from '@/lib/parse-contractroute';
 import { castSilverContractForPostgres } from '@/lib/silver-contract-sanitize';
@@ -73,7 +74,7 @@ export async function POST(request: Request) {
       });
     }
 
-    const rawContractText = String(bronzeData.raw_text || '');
+    const rawContractText = bronzeRawText(bronzeData);
     if (rawContractText.length > MAX_CONTRACT_CHARS) {
       await supabase
         .from('bronze_contract_raw_payloads')

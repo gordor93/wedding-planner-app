@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 import { PDFParse } from 'pdf-parse';
+import { bronzeRawText } from '@/lib/bronze-payload';
 import { formatOpenAIError, transcribePdfWithOpenAI } from '@/lib/openai';
 
 export const runtime = 'nodejs';
@@ -78,14 +79,14 @@ export async function POST(request: Request) {
 
     const { data: cachedRows, error: cacheError } = await supabase
       .from('bronze_contract_raw_payloads')
-      .select('id, raw_text')
+      .select('*')
       .eq('file_name', file.name);
 
     if (cacheError) {
       console.warn('Bronze cache lookup failed:', cacheError.message);
     }
 
-    const cached = cachedRows?.find((row) => hasUsefulText(String(row.raw_text || '')));
+    const cached = cachedRows?.find((row) => hasUsefulText(bronzeRawText(row)));
     if (cached) {
       return NextResponse.json({
         id: cached.id,
@@ -133,6 +134,11 @@ export async function POST(request: Request) {
 
     if (error) {
       console.error('Supabase Core Sync Error:', error);
+      if (error.code === 'PGRST204' || /raw_text/i.test(error.message || '')) {
+        throw new Error(
+          "Bronze table is missing raw_text. Run supabase/bronze_contract_raw_payloads.sql in the Supabase SQL editor, then upload again."
+        );
+      }
       throw error;
     }
 
