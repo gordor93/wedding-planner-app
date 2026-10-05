@@ -48,7 +48,9 @@ export default function UploadPage() {
         const parserLabel =
           result.extractionMethod === 'openai'
             ? 'OpenAI (scan or screenshot PDF)'
-            : 'local PDF text extraction'
+            : result.extractionMethod === 'cached'
+              ? 'saved Bronze text'
+              : 'pdf-parse'
         setStatus(`✅ Saved to Bronze via ${parserLabel}! Processing data into structured Silver tables now...`)
     
         // 2. Instantly pass the new Bronze ID to your fresh process-silver folder API route!
@@ -63,10 +65,11 @@ export default function UploadPage() {
     
         const silverResult = await silverResponse.json()
     
-        if (silverResponse.ok) {
-          setStatus(`✅ Done! Extracted "${silverResult.contract.client_name}" into Silver Contracts!`)
+        if (silverResponse.ok && silverResult.success !== false) {
+          setStatus(`✅ Done! Extracted "${silverResult.contract?.client_name || 'contract fields'}" into Silver Contracts!`)
         } else {
-          setStatus(`⚠️ Saved raw text to Bronze, but Silver parsing failed: ${silverResult.error}`)
+          const details = (silverResult.errors || [silverResult.error]).filter(Boolean).join('; ')
+          setStatus(`⚠️ Saved raw text to Bronze, but Silver skipped a bad row: ${details}`)
         }
       } else {
         setStatus(`❌ Processing runtime error: ${result.error || 'Failed to parse.'}`)

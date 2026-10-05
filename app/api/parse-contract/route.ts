@@ -7,6 +7,7 @@ export const runtime = 'nodejs';
 export const maxDuration = 300;
 
 const MIN_USEFUL_TEXT_LENGTH = 40;
+const MAX_LOCAL_PAGES = 10;
 
 const GEMINI_TRANSCRIBE_PROMPT = `You are an expert contract transcriber for a wedding planning application.
 Read this document carefully. Extract and transcribe all visible textual content,
@@ -14,51 +15,41 @@ clauses, payment schedules, names, and terms exactly as written.
 If the document is a scanned image, screenshot, blurry photo, or handwriting, use your vision capabilities to perform high-fidelity text extraction.
 Return ONLY the extracted text lines. Do not add conversational introductions, summaries, or markdown fences.`;
 
-type ExtractionMethod = 'local' | 'openai';
+type ExtractionMethod = 'pdf-parse' | 'openai' | 'cached';
 
 function isPdf(file: File) {
   return file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
 }
 
-function normalizeLocalPdfText(text: string) {
-  return text
-    .replace(/--\s*\d+\s+of\s+\d+\s*--/gi, '')
-    .replace(/\s+/g, ' ')
-    .trim();
+function normalizeExtractedText(text: string) {
+  return text.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
 }
 
 function hasUsefulText(text: string) {
-  return normalizeLocalPdfText(text).length >= MIN_USEFUL_TEXT_LENGTH;
+  return normalizeExtractedText(text).replace(/---\s*page\s+\d+\s*---/gi, '').trim().length >= MIN_USEFUL_TEXT_LENGTH;
 }
 
-async function extractLocalPdfText(bytes: Uint8Array): Promise<string> {
+async function extractWithPdfParse(bytes: Uint8Array): Promise<string> {
+  const parser = new PDFParse({ data: bytes.slice() });
   try {
-    const parser = new PDFParse({ data: bytes.slice() });
-    try {
-      const result = await parser.getText();
-      const text = result.text?.trim() ?? '';
-      if (text) return text;
-    } finally {
-      await parser.destroy();
-    }
-  } catch (error) {
-    console.warn('pdf-parse failed, trying pdf-parse-fork:', error);
-  }
+    const result = await parser.getText({
+      first: MAX_LOCAL_PAGES,
+      lineEnforce: true,
+      pageJoiner: '\n--- page page_number ---\n',
+    });
 
-  try {
-    const pdfParseFork = (await import('pdf-parse-fork')).default as (buffer: Buffer) => Promise<{ text?: string }>;
-    const result = await pdfParseFork(Buffer.from(bytes));
-    return result.text?.trim() ?? '';
-  } catch (error) {
-    console.warn('pdf-parse-fork failed, trying pdf-text-reader:', error);
-  }
+    const pages = [...result.pages]
+      .sort((a, b) => a.num - b.num)
+      .map((page) => {
+        const pageText = page.text?.trim() ?? '';
+        if (!pageText) return '';
+        return `--- page ${page.num} ---\n${pageText}`;
+      })
+      .filter(Boolean);
 
-  try {
-    const { readPdfText } = await import('pdf-text-reader');
-    return (await readPdfText({ data: bytes.slice() })).trim();
-  } catch (error) {
-    console.warn('Local PDF parsers could not extract text:', error);
-    return '';
+    return normalizeExtractedText(pages.join('\n\n') || result.text || '');
+  } finally {
+    await parser.destroy();
   }
 }
 
@@ -80,10 +71,39 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Please upload a PDF contract' }, { status: 400 });
     }
 
+    const supabase = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+    );
+
+    const { data: cachedRows, error: cacheError } = await supabase
+      .from('bronze_contract_raw_payloads')
+      .select('id, raw_text')
+      .eq('file_name', file.name);
+
+    if (cacheError) {
+      console.warn('Bronze cache lookup failed:', cacheError.message);
+    }
+
+    const cached = cachedRows?.find((row) => hasUsefulText(String(row.raw_text || '')));
+    if (cached) {
+      return NextResponse.json({
+        id: cached.id,
+        message: 'Reused prior Bronze text for this file (skipped OpenAI scan)',
+        extractionMethod: 'cached',
+      });
+    }
+
     const bytes = new Uint8Array(await file.arrayBuffer());
 
-    let extractedText = normalizeLocalPdfText(await extractLocalPdfText(bytes));
-    let extractionMethod: ExtractionMethod = 'local';
+    let extractedText = '';
+    let extractionMethod: ExtractionMethod = 'pdf-parse';
+
+    try {
+      extractedText = await extractWithPdfParse(bytes);
+    } catch (error) {
+      console.warn('pdf-parse text extraction failed:', error);
+    }
 
     if (!hasUsefulText(extractedText)) {
       extractionMethod = 'openai';
@@ -97,11 +117,6 @@ export async function POST(request: Request) {
     if (!extractedText) {
       throw new Error('No text could be extracted from this PDF with local parsing or OpenAI.');
     }
-
-    const supabase = createClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-    );
 
     const { data, error } = await supabase
       .from('bronze_contract_raw_payloads')
@@ -128,6 +143,8 @@ export async function POST(request: Request) {
     });
   } catch (error: any) {
     console.error('Contract ingestion crash:', error.message);
-    return NextResponse.json({ error: error.message || 'Internal processing error' }, { status: 500 });
+    const message = error.message || 'Internal processing error';
+    const status = /rate-limited|quota/i.test(message) ? 429 : 500;
+    return NextResponse.json({ error: message }, { status });
   }
 }

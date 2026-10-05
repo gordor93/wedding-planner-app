@@ -1,19 +1,39 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 import { formatOpenAIError } from '@/lib/openai';
-import { parseProcessSilver } from '@/lib/parse-contractroute';
+import { parseSilverContractInPageBatches, type SilverContract } from '@/lib/parse-contractroute';
+import { castSilverContractForPostgres } from '@/lib/silver-contract-sanitize';
 
 export const runtime = 'nodejs';
 export const maxDuration = 300;
 
 const MAX_CONTRACT_CHARS = 40_000;
 
+function emptySilverContract(): SilverContract {
+  return {
+    vendor_name: '',
+    vendor_type: '',
+    contract_type: '',
+    client_name: '',
+    event_date: '',
+    grand_total: '',
+    payment_milestones: [],
+  };
+}
+
 export async function POST(request: Request) {
+  let payloadId: unknown = null;
+
   try {
-    const { payloadId, weddingId } = await request.json();
+    const body = await request.json();
+    payloadId = body.payloadId;
+    const weddingId = body.weddingId;
 
     if (!payloadId) {
-      return NextResponse.json({ error: 'Missing Bronze payload row ID' }, { status: 400 });
+      return NextResponse.json(
+        { success: false, error: 'Missing Bronze payload row ID', errors: ['payloadId is required'] },
+        { status: 400 }
+      );
     }
 
     const supabase = createClient(
@@ -25,69 +45,150 @@ export async function POST(request: Request) {
       .from('bronze_contract_raw_payloads')
       .select('*')
       .eq('id', payloadId)
-      .single();
+      .maybeSingle();
 
     if (bronzeError || !bronzeData) {
-      throw new Error(`Failed to fetch Bronze row payload: ${bronzeError?.message || 'Not found'}`);
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'Bronze payload was not found',
+          errors: [bronzeError?.message || 'Not found'],
+        },
+        { status: 200 }
+      );
+    }
+
+    const { data: existingContract } = await supabase
+      .from('silver_contracts')
+      .select('*')
+      .eq('bronze_payload_id', payloadId)
+      .maybeSingle();
+
+    if (existingContract) {
+      return NextResponse.json({
+        success: true,
+        message: 'Reused existing silver_contracts row for this Bronze payload.',
+        contract: existingContract,
+        warnings: [],
+      });
     }
 
     const rawContractText = String(bronzeData.raw_text || '');
     if (rawContractText.length > MAX_CONTRACT_CHARS) {
-      throw new Error('Contract exceeds the 10-page operational limit');
+      await supabase
+        .from('bronze_contract_raw_payloads')
+        .update({ status: 'failed_validation' })
+        .eq('id', bronzeData.id);
+
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'Contract exceeds the 10-page operational limit',
+          errors: ['raw_text exceeds 40000 characters'],
+        },
+        { status: 200 }
+      );
     }
 
-    const silverContract = await parseProcessSilver(rawContractText);
+    let extracted = emptySilverContract();
+    const parseWarnings: string[] = [];
+    try {
+      extracted = await parseSilverContractInPageBatches(rawContractText, {
+        vendorTypeHint: bronzeData.vendor_type,
+      });
+    } catch (error) {
+      parseWarnings.push(formatOpenAIError(error));
+    }
 
     let vendorId: string | null = null;
     if (weddingId) {
-      const { data: linkedVendor, error: vendorLookupError } = await supabase
-        .from('silver_vendors')
-        .select('id')
-        .eq('wedding_id', weddingId)
-        .eq('category', silverContract.vendor_type || bronzeData.vendor_type)
-        .maybeSingle();
+      try {
+        const { data: linkedVendor, error: vendorLookupError } = await supabase
+          .from('silver_vendors')
+          .select('id')
+          .eq('wedding_id', weddingId)
+          .eq('category', extracted.vendor_type || bronzeData.vendor_type)
+          .maybeSingle();
 
-      if (!vendorLookupError) {
-        vendorId = linkedVendor?.id || null;
+        if (!vendorLookupError) {
+          vendorId = linkedVendor?.id || null;
+        }
+      } catch (error) {
+        parseWarnings.push(`vendor lookup skipped: ${error instanceof Error ? error.message : 'unknown error'}`);
       }
+    }
+
+    const cast = castSilverContractForPostgres({
+      extracted,
+      rawText: rawContractText,
+      payloadId: bronzeData.id,
+      weddingId,
+      vendorId,
+      vendorTypeHint: bronzeData.vendor_type,
+    });
+    const warnings = [...parseWarnings, ...cast.warnings];
+
+    if (!cast.row) {
+      await supabase
+        .from('bronze_contract_raw_payloads')
+        .update({ status: 'failed_validation' })
+        .eq('id', bronzeData.id);
+
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'Silver row failed validation and was skipped',
+          errors: cast.errors,
+          warnings,
+        },
+        { status: 200 }
+      );
     }
 
     const { data: newContract, error: silverError } = await supabase
       .from('silver_contracts')
-      .insert([
-        {
-          wedding_id: weddingId || null,
-          bronze_payload_id: payloadId,
-          vendor_id: vendorId,
-          vendor_name: silverContract.vendor_name,
-          vendor_type: silverContract.vendor_type || bronzeData.vendor_type,
-          contract_type: silverContract.contract_type,
-          client_name: silverContract.client_name,
-          event_date: silverContract.event_date,
-          payment_milestones: silverContract.payment_milestones,
-        },
-      ])
+      .insert([cast.row])
       .select()
-      .single();
+      .maybeSingle();
 
-    if (silverError) throw silverError;
+    if (silverError || !newContract) {
+      await supabase
+        .from('bronze_contract_raw_payloads')
+        .update({ status: 'failed_validation' })
+        .eq('id', bronzeData.id);
+
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'Silver insert was skipped because the row failed PostgreSQL type checks',
+          errors: [silverError?.message || 'insert returned no row'],
+          warnings,
+        },
+        { status: 200 }
+      );
+    }
 
     await supabase
       .from('bronze_contract_raw_payloads')
       .update({ status: 'processed' })
-      .eq('id', payloadId);
+      .eq('id', bronzeData.id);
 
     return NextResponse.json({
       success: true,
       message: 'Successfully parsed the bronze contract into silver_contracts.',
       contract: newContract,
+      warnings,
     });
-  } catch (error: any) {
-    console.error('Silver Layer Processing Crash:', error.message);
-    const message =
-      error.message === 'Contract exceeds the 10-page operational limit'
-        ? error.message
-        : formatOpenAIError(error);
-    return NextResponse.json({ error: message }, { status: 500 });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : 'Silver processing failed';
+    console.error('Silver Layer Processing Crash:', message, { payloadId });
+    return NextResponse.json(
+      {
+        success: false,
+        error: formatOpenAIError(error),
+        errors: [message],
+      },
+      { status: 200 }
+    );
   }
 }
