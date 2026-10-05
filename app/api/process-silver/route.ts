@@ -153,15 +153,20 @@ export async function POST(request: Request) {
       .maybeSingle();
 
     if (silverError || !newContract) {
-      await supabase
-        .from('bronze_contract_raw_payloads')
-        .update({ status: 'failed_validation' })
-        .eq('id', bronzeData.id);
+      const permissionDenied = /permission denied/i.test(silverError?.message || '');
+      if (!permissionDenied) {
+        await supabase
+          .from('bronze_contract_raw_payloads')
+          .update({ status: 'failed_validation' })
+          .eq('id', bronzeData.id);
+      }
 
       return NextResponse.json(
         {
           success: false,
-          error: 'Silver insert was skipped because the row failed PostgreSQL type checks',
+          error: permissionDenied
+            ? 'The anon role cannot write silver_contracts. Run supabase/silver_contracts.sql in the Supabase SQL editor, then upload again.'
+            : 'Silver insert was skipped because the row failed PostgreSQL type checks',
           errors: [silverError?.message || 'insert returned no row'],
           warnings,
         },

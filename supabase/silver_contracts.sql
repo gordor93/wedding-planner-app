@@ -20,3 +20,33 @@ create index if not exists silver_contracts_bronze_payload_id_idx
 
 create index if not exists silver_contracts_vendor_id_idx
   on public.silver_contracts (vendor_id);
+
+grant usage on schema public to anon, authenticated;
+
+grant select, insert, update on public.silver_contracts to anon, authenticated;
+
+alter table public.silver_contracts enable row level security;
+
+drop policy if exists silver_contracts_select_anon on public.silver_contracts;
+create policy silver_contracts_select_anon
+  on public.silver_contracts
+  for select
+  to anon, authenticated
+  using (true);
+
+drop policy if exists silver_contracts_insert_anon on public.silver_contracts;
+create policy silver_contracts_insert_anon
+  on public.silver_contracts
+  for insert
+  to anon, authenticated
+  with check (true);
+
+drop policy if exists silver_contracts_update_anon on public.silver_contracts;
+create policy silver_contracts_update_anon
+  on public.silver_contracts
+  for update
+  to anon, authenticated
+  using (true)
+  with check (true);
+
+notify pgrst, 'reload schema';

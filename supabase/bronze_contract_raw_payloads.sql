@@ -6,3 +6,6 @@ alter table public.bronze_contract_raw_payloads
   add column if not exists vendor_type text;
 
 notify pgrst, 'reload schema';
+
+grant usage on schema public to anon, authenticated;
+grant select, insert, update on public.bronze_contract_raw_payloads to anon, authenticated;
